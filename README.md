@@ -1,2 +1,3 @@
 # psych_mpra
-analysis scripts for the MPRA section of MPRA
+analysis scripts for the MPRA section of paper Guo et al., "Compendium of functional regulatory variants in human neuropsychiatric disease"
+"
