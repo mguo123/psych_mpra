@@ -1,0 +1,948 @@
+---
+title: "4_motifBreakR_analysis_psych"
+output: html_notebook
+---
+
+https://www.bioconductor.org/packages/release/bioc/vignettes/motifbreakR/inst/doc/motifbreakR-vignette.html
+
+# 0. Import Packages
+
+
+```{r}
+# # install instruction from github
+# if (!requireNamespace("BiocManager", quietly=TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install(c("BiocParallel", "motifStack", "BSgenome", "BiocGenerics",
+#            "Biostrings", "GenomeInfoDb", "GenomicRanges", "Gviz", "S4Vectors",
+#            "rtracklayer", "IRanges", "MotifDb", "BSgenome.Hsapiens.UCSC.hg19",
+#            "SNPlocs.Hsapiens.dbSNP.20120608", "SNPlocs.Hsapiens.dbSNP142.GRCh37",
+#            "VariantAnnotation", "matrixStats", "BiocStyle"))
+# install.packages(c("TFMPvalue", "knitr", "rmarkdown"))
+# 
+# # install from github
+# install.packages("devtools")
+# devtools::install_github("Simon-Coetzee/motifBreakR")
+```
+
+```{r}
+library(tidyverse)
+library(motifbreakR)
+library(MotifDb)
+library(rtracklayer)
+library(pheatmap)
+library(RColorBrewer)
+# BiocManager::install('SNPlocs.Hsapiens.dbSNP142.GRCh37')
+# library(SNPlocs.Hsapiens.dbSNP142.GRCh37)
+# BiocManager::install("SNPlocs.Hsapiens.dbSNP144.GRCh37" )
+library(SNPlocs.Hsapiens.dbSNP144.GRCh37)
+
+# BiocManager::install('BSgenome.Hsapiens.UCSC.hg19')
+library(BSgenome)
+library(BSgenome.Hsapiens.UCSC.hg19)
+```
+
+# 1. Get library file
+
+```{r}
+
+setwd('~/Google Drive/1_khavari/noncancer_project/miseq/novogene_071420/')
+
+save_dir = 'motifbreakr_results/'
+if (!file.exists(save_dir)){
+    dir.create(save_dir)
+}
+
+lib_df <- read.csv('~/Google Drive/1_khavari/noncancer_project/psych_lib_info.csv')
+lib_df = lib_df%>%
+  mutate(rowname=str_c(Chr, Position,sep= '_'))
+
+
+tf_df <- read.csv('~/Documents/pan_omics_psych/data/external/HOCOMOCOv11_full_annotation_HUMAN_mono.tsv', sep='\t')
+
+mpra_df <- read.csv('D_mpraanalyze_barcode_allelic/final_df_filt.csv')
+mpra_df <- mpra_df%>%
+  left_join(lib_df[,c("Linked_SNP","rowname")],by='rowname')
+
+
+
+save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
+   stopifnot(!missing(x))
+   stopifnot(!missing(filename))
+   pdf(filename, width=width, height=height)
+   grid::grid.newpage()
+   grid::grid.draw(x$gtable)
+   dev.off()
+}
+
+
+```
+
+
+# 2. Get variants
+
+```{r}
+available.SNPs()
+```
+
+## 2A. from rsid
+
+We use the `SNPlocs.Hsapiens.dbSNP142.GRCh37` which is the SNP locations and alleles defined in `dbSNP142` as a source for looking up our `rsIDs` and `BSgenome.Hsapiens.UCSC.hg19` which holds the reference sequence for UCSC genome build hg19. Additional SNPlocs packages are availble from Bioconductor.
+
+```{r,time_it = TRUE}
+# Start the clock!
+ptm <- proc.time()
+
+# from rsid
+# takes 1-2 min to run
+variants <- snps.from.rsid(rsid = lib_df$Linked_SNP,
+                           dbSNP = SNPlocs.Hsapiens.dbSNP144.GRCh37,
+                           search.genome = BSgenome.Hsapiens.UCSC.hg19)
+
+
+saveRDS(variants, file = paste0(save_dir, "motifBreakR_variants.rds"))
+
+# # Restore variants
+# variants <- readRDS(paste0(save_dir, "motifBreakR_variants.rds"))
+
+length(unique(lib_df$Linked_SNP)) #[1] 2221
+length(unique(data.frame(variants)$SNP_id)) #[1] 2115
+# 
+
+# Stop the clock
+proc.time() - ptm
+
+```
+
+
+## 2B. from bed (doesn't work)
+```{r}
+# # from bed
+# snp_bed = lib_df[,c("Chr", "Position", "Linked_SNP", "name")]
+# colnames(snp_bed) = c('chr', 'start', 'rsid', 'name')
+# snp_bed$stop = snp_bed$start +1
+# snp_bed = snp_bed[,c("chr", "start", "stop", "name")]
+# snp_bed$quality = 0
+# snp_bed$strand = '+'
+# 
+# snps.bed.file = '~/Google Drive/1_khavari/noncancer_project/psych_lib.bed'
+# write.table(snp_bed, snps.bed.file,sep='\t',
+#             row.names=FALSE,col.names=FALSE, quote=FALSE)
+# # 
+# # snps.bed.file.test = '~/Google Drive/1_khavari/noncancer_project/psych_lib_test.bed'
+# # 
+# # write.table(head(snp_bed,50), snps.bed.file.test,sep='\t',
+# #             row.names=FALSE,col.names=FALSE, quote=FALSE)
+# 
+# # snps.bed.file <- system.file("extdata", "snps.bed", package = "motifbreakR")
+
+
+# variants <- snps.from.file(file = snps.bed.file,
+#                                   dbSNP = SNPlocs.Hsapiens.dbSNP144.GRCh37,
+#                                   search.genome = BSgenome.Hsapiens.UCSC.hg19,
+#                                   format = "bed")
+```
+
+
+# 3. get motifs
+
+```{r}
+MotifDb
+
+# data(motifbreakR_motif)
+# motifbreakR_motif
+data( hocomoco)
+ hocomoco
+ 
+ motifs <- query(MotifDb, andStrings=c( "hsapiens"),
+                orStrings=c("jaspar2018", "hocomocov11-core-A", "hocomocov11-core-B", "hocomocov11-core-C","HOCOMOCOv11-secondary-A","HOCOMOCOv11-secondary-B","HOCOMOCOv11-secondary-C","HOCOMOCOv11-secondary-D"))
+length(motifs)
+ 
+```
+
+
+# 4. run motifBreakR analysis
+Now that we have the three necessary components to run motifbreakR:
+
+A BSgenome object for our organism, in this case `BSgenome.Hsapiens.UCSC.hg19`
+A MotifList object containing our motifs, in this case hocomoco,
+And our input `GRanges` object generated by `snps.from.rsid`, in this case `variants`
+
+Here we specify the `snpList`, `pwmList`, `threshold` that we declare as the cutoff for reporting results, filterp set to true declares that we are filtering by p-value, the method, and bkg the relative nucleotide frequency of A, C, G, and T.
+
+
+```{r,time_it = TRUE}
+# Start the clock!
+ptm <- proc.time()
+
+# # take a ~10-20 min to run
+# results <- motifbreakR(snpList = variants, filterp = TRUE,
+#                        pwmList = hocomoco,
+#                        threshold = 1e-4,
+#                        method = "ic",
+#                        bkg = c(A=0.25, C=0.25, G=0.25, T=0.25),
+#                        BPPARAM = BiocParallel::bpparam())
+# write.table( x = data.frame(results), file = paste0(save_dir,"motifBreakR_granges.txt"), sep="'\t", col.names=TRUE, row.names=FALSE, quote=FALSE )
+# saveRDS(results, file = paste0(save_dir,"motifBreakR_granges.rds") )
+
+
+# Restore results
+results <- readRDS(paste0(save_dir,"motifBreakR_granges.rds") )
+
+# number of snps that broke or created something
+length(sort(unique(names(results))))
+# Stop the clock
+proc.time() - ptm
+
+```
+
+# 4. plotting and pvalues
+
+
+The results reveal which variants disrupt which motifs, and to which degree. If we want to examine a single variant, we can select one like this: We can then check what the pvalue for each allele is with regard to each motif, using `calculatePvalue`.
+```{r}
+# Start the clock!
+ptm <- proc.time()
+
+
+## TESTING
+# snp <- "rs10192179"
+# snp_res <- results[names(results) %in% snp]
+# snp_res <- calculatePvalue(snp_res)
+# write.csv(data.frame(snp_res), paste0(save_dir, snp, '_results.csv'))
+# # head(lib_df[lib_df$Linked_SNP==snp,])
+# pdf(paste0(save_dir, snp, "_motifplot.pdf"))
+# plotMB(results = results, rsid = snp, effect = "strong")
+# dev.off()
+
+
+# loop through the snps
+snps_with_strong_hits = c()
+num_snps_with_strong_hits = 0
+for (snp in sort(unique(names(results)))){
+  snp_res <- results[names(results) %in% snp]
+  print('****')
+  num_hits = dim(data.frame(snp_res))[1]
+  print(paste(snp, num_hits, 'hits'))
+  
+  # snp_res <- calculatePvalue(snp_res)
+  write.table(data.frame(snp_res), paste0(save_dir, snp, '_results.txt'),sep='\t')
+  # head(lib_df[lib_df$Linked_SNP==snp,])
+  num_strong_hits = dim(data.frame(snp_res) %>% filter(effect=='strong'))[1]
+
+  print(paste(snp, num_strong_hits, 'strong hits'))
+  
+  
+  if (num_strong_hits>0){
+     snps_with_strong_hits = c(snps_with_strong_hits, snp)
+    num_snps_with_strong_hits = num_snps_with_strong_hits+1
+    motifplot_file = paste0(save_dir, snp, "_motifplot.pdf")
+    if ((!file.exists(motifplot_file)) ){
+      if((num_strong_hits<20)){
+          pdf(motifplot_file)
+          plotMB(results = results, rsid = snp, effect = "strong")
+          dev.off()
+          print('made plot')        
+      }
+      else{
+        print('too many motifs. skip plot making')
+      }
+
+    }
+    else{
+      print('plot already made')
+    }
+
+  }
+}
+print(num_snps_with_strong_hits)
+
+# Stop the clock
+proc.time() - ptm
+
+snp="rs12264415"
+ motifplot_file = paste0(save_dir, snp, "_motifplot.pdf")
+plotMB(results = results, rsid = snp, effect = "weak")
+pdf(motifplot_file)
+plotMB(results = results, rsid = snp, effect = "weak")
+dev.off()
+
+```
+
+
+
+# 5. Analysis
+
+5A
+- p value distribution p-val not calculated but only really care about strong hits
+- number of hits that are strong  DONE
+- density distribution plot of effect size DONE
+
+5B
+- histogram/density plot of # motifs per snp
+- directionality? does the snp disrupt/introduce motifs
+
+5C
+- per motif disruption
+
+5D
+- per disease disruption
+- overlap with MPRA results, are MPRA results enriched for snps that break motifs?
+- (overlay with MPRA results) motif enrichment of motifs broken by snps ##todo figure out background
+- prediction can you predict MPRA results from motifs broken/gained
+- can you draw vignettes for a couple motifs that are broken leading to egenes (that are disease relevant)
+- 
+
+```{r}
+motif_results_files = list.files('motifbreakr_results/',pattern='*_results.txt')
+length(motif_results_files)
+test = motif_results_files[1]
+motif_df = data.frame()
+for (file in motif_results_files){
+  motif_df = rbind(motif_df, read.table(paste0('motifbreakr_results/', file),sep='\t'))
+}
+  
+motif_df = motif_df%>%
+  mutate(allele_dir_bool = if_else(alleleDiff>0,'gained','broken'))
+
+dim(motif_df)
+head(motif_df)
+write.csv(motif_df, 'motifbreakr_results/motif_df.csv')
+```
+
+## 5A. `alleleDiff` distribution
+```{r}
+motif_df%>%
+  group_by(effect)%>%
+  select(alleleDiff)%>%
+  summarise_each(funs(min = min, 
+                      q25 = quantile(., 0.25), 
+                      median = median, 
+                      q75 = quantile(., 0.75), 
+                      max = max,
+                      mean = mean, 
+                      sd = sd))
+motif_df%>%
+  group_by(effect)%>%
+  tally()
+ggplot(motif_df,aes(x=alleleDiff,color=effect))+geom_density()
+
+```
+- number of hits that are strong  # 2534 hits that are strong
+
+
+
+## 5B motif stats
+- histogram/density plot of # motifs per snp
+- directionality? does the snp disrupt/introduce motifs
+
+```{r}
+motifs_per_snp = motif_df%>%
+  group_by(SNP_id)%>%
+  tally()
+
+ggplot(motifs_per_snp, aes(x=n))+geom_histogram()
+
+
+
+motifs_per_snp_dir = motif_df%>%
+  group_by(SNP_id, allele_dir_bool)%>%
+  tally()
+
+ggplot(motifs_per_snp_dir, aes(x=n,fill=allele_dir_bool))+geom_histogram()
+ggsave('motifbreakr_results/motifs_per_snp_dir.pdf')
+```
+
+## 5C - per motif disruption
+
+for each motif, plot di
+```{r}
+# motif disruption addition counts (strong effects only)
+# tf_df_sel = tf_df %>%
+#   group_by(Transcription.factor)%>%
+#    arrange(Model.length)%>%
+#   filter(row_number()==1 )
+
+# motif counts with motif length (given consensus sequence???? not sure if this is the best way to do it)
+motif_counts = motif_df%>%
+    filter(effect=='strong')%>%
+    mutate(num_bp = str_length(trimws(seqMatch)))%>%
+    select(geneSymbol, SNP_id, num_bp)%>%
+    distinct()%>%
+    group_by(geneSymbol, num_bp)%>%
+    tally()%>%
+    arrange(desc(n))#%>%
+    # left_join(tf_df_sel, by=c('geneSymbol'='Transcription.factor'))
+motif_counts
+
+motif_dir_ratio_df = motif_df%>%
+    filter(effect=='strong')%>%
+    select(geneSymbol, SNP_id,allele_dir_bool)%>%
+    distinct()%>%
+    group_by(geneSymbol,allele_dir_bool)%>%
+    tally()%>%
+    arrange(desc(n))%>%
+    pivot_wider(names_from = allele_dir_bool,values_from=n)%>%
+    mutate(broken = replace_na(broken,0))%>%
+    mutate(gained = replace_na(gained,0))%>%
+    mutate(broken_gained_ratio = broken/gained)%>%
+    mutate(broken_gained_ratio = broken/gained)%>%
+    mutate(broken_gained_ratio_pseudo = (broken+.01)/(gained+.01))%>%
+    left_join(motif_counts,by="geneSymbol")%>%
+    arrange(broken_gained_ratio_pseudo)
+ 
+motif_dir_ratio_df
+write.csv(motif_dir_ratio_df, 'motifbreakr_results/motif_dir_ratio_df.csv')
+```
+FOXJ3, SP1, EGR4, MAX, NHLH1, and IRF3 are the most common TFs
+
+
+
+
+
+
+## 5D per disease disruption
+
+```{r}
+# number of SNPs per disease
+motif_df = read.csv( '~/Google Drive/1_khavari/noncancer_project/miseq/novogene_071420/motifbreakr_results/motif_df.csv')
+diseases = c('schizo','depress','bipolar','anxiety','attent','personality','panic','traum','autism','ocd')
+list_snp_per_disease = sapply(diseases, function(x){unique(lib_df[lib_df[x]==1,"Linked_SNP"])})
+sapply(list_snp_per_disease,length)
+
+motif_df_strong = filter(motif_df, effect=='strong')
+
+# loop through diseases to get info on all snps per disease and their motif disruption info 
+motif_df_dz_all = data.frame()
+for (dz in diseases){
+  motif_df_dz = data.frame(snp=list_snp_per_disease[[dz]])%>%
+    left_join(motif_df_strong, by=c('snp'='SNP_id'))%>%
+    group_by(snp, allele_dir_bool)%>%
+    tally()%>%
+    arrange(desc(n))%>%
+    pivot_wider(names_from = allele_dir_bool,values_from=n)%>%
+    mutate(broken = replace_na(broken,0))%>%
+    mutate(gained = replace_na(gained,0))%>%
+    mutate(total = broken+gained)%>%
+    mutate(broken_gained_ratio = broken/gained)%>%
+    mutate(broken_gained_ratio = broken/gained)%>%
+    mutate(broken_gained_ratio_pseudo = (broken+.01)/(gained+.01))%>%
+    mutate(disease=dz)%>%
+    arrange(desc(total))
+  
+  
+  
+  motif_df_dz_all = rbind(motif_df_dz_all, motif_df_dz)
+}
+
+list_snp_per_disease_motif_disrupt = sapply(diseases, 
+                                            function(dz){
+                                              unique(motif_df_dz_all[(motif_df_dz_all$total>0) & (motif_df_dz_all$disease==dz),]$snp)})
+
+sapply(list_snp_per_disease_motif_disrupt,length)
+
+
+
+dim(motif_df_dz_all)
+write.csv(motif_df_dz_all, 'motifbreakr_results/motif_df_dz_all.csv')
+
+# summarize counts/frac snps disrupts per disease
+motif_df_dz_all_counts = motif_df_dz_all%>%
+  group_by(disease)%>%
+  summarize(num_snps=n(), num_snps_w_motif = sum(total>0))%>%
+  mutate(frac_w_motif = num_snps_w_motif/num_snps)
+
+motif_df_dz_all_counts
+write.csv(motif_df_dz_all_counts, 'motifbreakr_results/motif_df_dz_all_counts.csv')
+  
+
+
+#
+```
+
+
+## 5D -enrichment of motifs in differentially active hits (disease specific and not)
+- enrichment of motifs in active sequences (noncomparative activity analysis)
+ hematpmap of motifs in lbirary across cell types
+ -
+ 
+ heatmaps of
+ - disease by motif, value is counts of motifs broken
+  - disease by motif, value is counts of motifs gained
+
+
+# Neuro Tfs
+
+A gene regulatory network of neural transcription factors that regulate the earliest steps in vertebrate neural development. Foxd4 is required for the expression of the remaining genes, and it directly activates Geminin, Zic2 and Sox11 (blue arrows). Together, these three genes mediate the downstream effects of Foxd4, which is to delay the expression of neural plate stem cell genes (Sox) and repress the expression of neural progenitor genes (Irx, Zic, bHLH).(https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4213760/)
+
+
+
+```{r}
+# get neuro tfs that are expressed at day 28 in H9D28
+motifs_possible = sort(unique(motif_df$geneSymbol))
+# motifs_possible
+length(motifs_possible)
+# rna_df = read.csv('/Users/mguo123/Documents/pan_omics_psych/data/interim/rna/tissue_tpm_sym.csv')
+# expr_d0 = rna_df$gene_id[rna_df$H9_D0>5]
+# expr_d28 = rna_df$gene_id[rna_df$H9_D28>5]
+# tfs_neuro = expr_d28[(expr_d28 %in% motifs_possible)& !(expr_d28 %in% expr_d0)]
+# length(tfs_neuro)
+# tfs_neuro
+neuro_tfs = c("NANOG"   ,            "NEUROD1" , "HOXA1"        ,       "HOXA10"      ,    "PAX6"  ,   "CTCF"      ,   "HOXA13"      , "TCF4"    , "RFX1"      ,  "EBF1"          ,         "RFX2"   ,             "RFX3"     ,      "HOXA5"  ,  "CUX1"      ,            "HOXA9"      ,         "HOXB6"     ,          "HOXB7"          ,     "HOXB8"        ,        "ONECUT1"    ,         "ONECUT2",        "JUN",                 "JUNB"       ,         "JUND"    ,   "FOS"   ,        "BACH1"   , "RUNX1"   ,            "RUNX2" ,    "TEAD1"   ,            "TEAD3"    ,           "TEAD4"  ,
+"HOXC6"      ,         "HOXC8"          ,    "HOXD10"     ,         "HOXD13"             , "HOXD4"  , "SP1","SOX15"    ,            "LHX2"    ,            "LHX3"   ,        "SOX17","MAF","MAFK",
+          "SOX2"         ,       "SOX4"      ,          "SOX9"     ,     "FOXD1"  ,  "BHLHE40"      ,       "BHLHE41"  ,    "ZIC1"     ,  "FOXC1","IRF5",   "GLI1",      "ZIC2"      ,     "PAX5","RUNX1","RUNX3","MAX", "KLF4","ATF1", "ESR2","RARB",   "ZIC3"  )
+neuro_tfs = unique(sort(neuro_tfs))
+sort(neuro_tfs)
+length(neuro_tfs)
+
+```
+
+
+```{r}
+# make a disease by 
+motif_df_strong_gained = filter(motif_df_strong, allele_dir_bool=='gained')
+motif_df_strong_broken = filter(motif_df_strong, allele_dir_bool=='broken')
+
+
+
+get_dz_motif_df = function(df,dz){
+  motif_df_dz = data.frame(snp=list_snp_per_disease[[dz]])%>%
+    left_join(df, by=c('snp'='SNP_id'))%>%
+    group_by(geneSymbol)%>%
+    tally()%>%
+    arrange(desc(n))%>%
+    mutate(disease=dz)
+  
+  
+  return (motif_df_dz)
+  
+}
+motif_sym_dz_gained = data.frame()
+motif_sym_dz_broken = data.frame()
+motif_sym_dz_strongall = data.frame()
+
+for (dz in diseases){
+  
+  motif_sym_dz_gained = rbind(motif_sym_dz_gained, get_dz_motif_df(motif_df_strong_gained,dz))
+  motif_sym_dz_broken = rbind(motif_sym_dz_broken, get_dz_motif_df(motif_df_strong_broken,dz))
+  motif_sym_dz_strongall = rbind(motif_sym_dz_strongall, get_dz_motif_df(motif_df_strong,dz))
+}
+ 
+motif_sym_dz_gained_spread = motif_sym_dz_gained%>%
+  filter(!is.na(geneSymbol))%>%
+  pivot_wider(id_cols = geneSymbol, names_from=disease,values_from=n)%>%
+  column_to_rownames('geneSymbol')
+motif_sym_dz_gained_spread[is.na(motif_sym_dz_gained_spread)] <- 0
+motif_sym_dz_gained_spread = motif_sym_dz_gained_spread%>%
+  filter(rowSums(.)>3)
+motif_sym_dz_gained_pseudo = motif_sym_dz_gained_spread*100 + 1
+motif_sym_dz_gained_pseudo_norm = scale(log(motif_sym_dz_gained_pseudo))
+motif_sym_dz_gained_pseudo_norm[motif_sym_dz_gained_pseudo_norm>2] = 2
+motif_sym_dz_gained_pseudo_norm[motif_sym_dz_gained_pseudo_norm < -2] = -2
+# pseudo_sum = sum(motif_sym_dz_gained_pseudo)
+# motif_sym_dz_gained_pseudo_norm = motif_sym_dz_gained_pseudo/(apply(motif_sym_dz_gained_pseudo, 2, sum)*apply(motif_sym_dz_gained_pseudo, 1, sum))*pseudo_sum
+# motif_sym_dz_gained_pseudo_norm = motif_sym_dz_gained_pseudo/apply(motif_sym_dz_gained_pseudo, 2, sum)*pseudo_sum
+# motif_sym_dz_gained_pseudo_norm = log(motif_sym_dz_gained_pseudo_norm/apply(motif_sym_dz_gained_pseudo, 1, sum))
+neuro_tfs_gainedn = neuro_tfs[neuro_tfs %in%rownames(motif_sym_dz_gained_pseudo_norm)]
+length(neuro_tfs_gainedn)
+high_var_tfs = names(tail(sort(apply(motif_sym_dz_gained_pseudo_norm, 1, sd)),50))
+p = pheatmap(motif_sym_dz_gained_pseudo_norm[high_var_tfs,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_gained_pseudo_norm_sel.pdf'), width=7,height=7)
+p = pheatmap(motif_sym_dz_gained_pseudo_norm, fontsize_row=6,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_gained_pseudo_norm.pdf'), width=7,height=15)
+p = pheatmap(motif_sym_dz_gained_pseudo_norm[neuro_tfs_gainedn,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_gained_pseudo_norm_neuro.pdf'), width=7,height=7)
+
+motif_sym_dz_broken_spread = motif_sym_dz_broken%>%
+  filter(!is.na(geneSymbol))%>%
+  pivot_wider(id_cols = geneSymbol, names_from=disease,values_from=n)%>%
+  column_to_rownames('geneSymbol')
+motif_sym_dz_broken_spread[is.na(motif_sym_dz_broken_spread)] <- 0
+motif_sym_dz_broken_spread = motif_sym_dz_broken_spread%>%
+  filter(rowSums(.)>3)
+motif_sym_dz_broken_pseudo = motif_sym_dz_broken_spread*100 + 1
+motif_sym_dz_broken_pseudo_norm = scale(log(motif_sym_dz_broken_pseudo))
+motif_sym_dz_broken_pseudo_norm[motif_sym_dz_broken_pseudo_norm>2] = 2
+motif_sym_dz_broken_pseudo_norm[motif_sym_dz_broken_pseudo_norm < -2] = -2
+# pseudo_sum = sum(motif_sym_dz_broken_pseudo)
+# motif_sym_dz_broken_pseudo_norm = motif_sym_dz_broken_pseudo/(apply(motif_sym_dz_broken_pseudo, 2, sum)*apply(motif_sym_dz_broken_pseudo, 1, sum))*pseudo_sum
+# motif_sym_dz_broken_pseudo_norm = motif_sym_dz_broken_pseudo/apply(motif_sym_dz_broken_pseudo, 2, sum)*pseudo_sum
+# motif_sym_dz_broken_pseudo_norm = log(motif_sym_dz_broken_pseudo_norm/apply(motif_sym_dz_broken_pseudo, 1, sum))
+neuro_tfs_broken = neuro_tfs[neuro_tfs %in%rownames(motif_sym_dz_broken_pseudo_norm)]
+length(neuro_tfs_broken)
+high_var_tfs = names(tail(sort(apply(motif_sym_dz_broken_pseudo_norm, 1, sd)),50))
+p = pheatmap(motif_sym_dz_broken_pseudo_norm[high_var_tfs,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_pseudo_norm_sel.pdf'), width=7,height=7)
+p = pheatmap(motif_sym_dz_broken_pseudo_norm, fontsize_row=6,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_pseudo_norm.pdf'), width=7,height=15)
+p = pheatmap(motif_sym_dz_broken_pseudo_norm[neuro_tfs_broken,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_pseudo_norm_neuro.pdf'), width=7,height=7)
+
+motif_sym_dz_strongall_spread = motif_sym_dz_strongall%>%
+  filter(!is.na(geneSymbol))%>%
+  pivot_wider(id_cols = geneSymbol, names_from=disease,values_from=n)%>%
+  column_to_rownames('geneSymbol')
+motif_sym_dz_strongall_spread[is.na(motif_sym_dz_strongall_spread)] <- 0
+motif_sym_dz_strongall_spread = motif_sym_dz_strongall_spread%>%
+  filter(rowSums(.)>3)
+motif_sym_dz_strongall_pseudo = motif_sym_dz_strongall_spread*100 + 1
+motif_sym_dz_strongall_pseudo_norm = scale(log(motif_sym_dz_strongall_pseudo))
+motif_sym_dz_strongall_pseudo_norm[motif_sym_dz_strongall_pseudo_norm>2] = 2
+motif_sym_dz_strongall_pseudo_norm[motif_sym_dz_strongall_pseudo_norm < -2] = -2
+# pseudo_sum = sum(motif_sym_dz_strongall_pseudo)
+# motif_sym_dz_strongall_pseudo_norm = motif_sym_dz_strongall_pseudo/(apply(motif_sym_dz_strongall_pseudo, 2, sum)*apply(motif_sym_dz_strongall_pseudo, 1, sum))*pseudo_sum
+# motif_sym_dz_strongall_pseudo_norm = motif_sym_dz_strongall_pseudo/apply(motif_sym_dz_strongall_pseudo, 2, sum)*pseudo_sum
+# motif_sym_dz_strongall_pseudo_norm = log(motif_sym_dz_strongall_pseudo_norm/apply(motif_sym_dz_strongall_pseudo, 1, sum))
+neuro_tfs_strongall = neuro_tfs[neuro_tfs %in%rownames(motif_sym_dz_strongall_pseudo_norm)]
+length(neuro_tfs_strongall)
+high_var_tfs = names(tail(sort(apply(motif_sym_dz_strongall_pseudo_norm, 1, sd)),50))
+p = pheatmap(motif_sym_dz_strongall_pseudo_norm[high_var_tfs,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_strongall_pseudo_norm_sel.pdf'), width=7,height=7)
+p = pheatmap(motif_sym_dz_strongall_pseudo_norm, fontsize_row=6,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_strongall_pseudo_norm.pdf'), width=7,height=15)
+p = pheatmap(motif_sym_dz_strongall_pseudo_norm[neuro_tfs_strongalln,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_strongall_pseudo_norm_neuro.pdf'), width=7,height=7)
+```
+
+
+## 5E MPRA results overlap
+- overlap with MPRA results, are MPRA results enriched for snps that break motifs?
+- (overlay with MPRA results) motif enrichment of motifs broken by snps ##todo figure out background
+
+```{r}
+motif_df_mpra = motif_df%>%
+  mutate(rowname=str_c(seqnames, start, sep='_'))%>%
+  select(SNP_id, rowname, )
+
+lib_df_sel = lib_df[,c("Linked_SNP",'rowname', diseases)]
+lib_df_sel%>%
+  left_join(motif_df_mpra, by=c("Linked_SNP"="SNP_id"))
+
+# loop through diseases to get info on all snps per disease and their mpra significance
+mpra_df_dz_all = data.frame()
+for (dz in diseases){
+  mpra_df_dz = data.frame(snp=list_snp_per_disease[[dz]])%>%
+    left_join(lib_df[,c("Linked_SNP","rowname")],by=c('snp'='Linked_SNP'))%>%
+    left_join(mpra_df, by="rowname")%>%
+    # filter(fdr<0.05)%>%
+    select(snp, rowname,tissue,  logFC)%>%
+    distinct()%>%
+    mutate(is_mpra_sig = !is.na(logFC))%>%
+    group_by(snp)%>%
+    summarize(num_snps_in_loci = n_distinct(rowname),
+              num_tissue = n_distinct(tissue), 
+              mean_logFC = mean(logFC),
+              is_mpra_sig = any(is_mpra_sig))%>%
+    mutate(is_motif_disrupted = snp %in% list_snp_per_disease_motif_disrupt[[dz]])%>%
+    mutate(disease=dz)%>%
+    # for fisher's exact
+    mutate(A = is_mpra_sig&is_motif_disrupted) %>%
+    mutate(B = (!is_mpra_sig)&is_motif_disrupted) %>%
+    mutate(C = is_mpra_sig&(!is_motif_disrupted)) %>%
+    mutate(D = (!is_mpra_sig)&(!is_motif_disrupted)) #%>%
+    
+
+  
+  print(dz)
+  # print( crossprod(as.matrix(mpra_df_dz[,c("is_mpra_sig",'is_motif_disrupted')])))
+  print(as.vector(sapply(mpra_df_dz[,c("A","B","C","D")],sum)))
+  contig_table = matrix(as.vector(sapply(mpra_df_dz[,c("A","B","C","D")],sum)),nrow=2,ncol=2,
+                        dimnames= list(mpra_sig=c("T","F"),
+                                       motif_disrupt = c("T","F")))
+  print(contig_table) 
+  # [A, C]
+  # [B, D]
+  print(fisher.test(contig_table))
+  mpra_df_dz_all = rbind(mpra_df_dz_all, mpra_df_dz)
+  
+}
+
+dim(mpra_df_dz_all)
+
+mpra_df_dz_all_summary= mpra_df_dz_all%>%
+    group_by(snp)%>%
+    select(is_mpra_sig, is_motif_disrupted,A,B,C,D)%>%
+    summarise_all(any)
+contig_table_all = matrix(as.vector(sapply(mpra_df_dz_all_summary[,c("A","B","C","D")],sum)),nrow=2,ncol=2,
+                        dimnames= list(mpra_sig=c("T","F"),
+                                       motif_disrupt = c("T","F")))
+  print(contig_table_all) 
+fisher.test(contig_table_all)
+
+
+list_snp_per_disease_mpra_sig = sapply(diseases, 
+                                            function(dz){
+                                              unique(mpra_df_dz_all[(mpra_df_dz_all$is_mpra_sig) & (mpra_df_dz_all$disease==dz),]$snp)})
+
+sapply(list_snp_per_disease_mpra_sig,length)
+
+write.csv(mpra_df_dz_all, 'motifbreakr_results/mpra_df_dz_all.csv')
+
+```
+nothing is significant at a bonferroni... per disease... might try per motif to see if there's any signal there
+
+
+
+```{r}
+ mpra_df_dz_all= read.csv( 'motifbreakr_results/mpra_df_dz_all.csv')
+motif_sym_dz_broken_mpra_spread = mpra_df_dz_all%>% 
+  left_join(motif_df_strong_broken[,c("SNP_id","geneSymbol")], by=c("snp"="SNP_id"))%>%
+  filter(is_mpra_sig)%>%
+  filter(!is.na(geneSymbol))%>%
+  group_by(geneSymbol,disease)%>%
+  tally()%>%
+  pivot_wider(id_cols = geneSymbol, names_from=disease,values_from=n)%>%
+  column_to_rownames('geneSymbol')
+
+
+motif_sym_dz_broken_mpra_spread[is.na(motif_sym_dz_broken_mpra_spread)] <- 0
+motif_sym_dz_broken_mpra_spread = motif_sym_dz_broken_mpra_spread%>%
+  filter(rowSums(.)>2)
+motif_sym_dz_broken_mpra_pseudo = motif_sym_dz_broken_mpra_spread*100 + 1
+motif_sym_dz_broken_mpra_pseudo_norm = scale(log(motif_sym_dz_broken_mpra_pseudo))
+motif_sym_dz_broken_mpra_pseudo_norm[motif_sym_dz_broken_mpra_pseudo_norm>2] = 2
+motif_sym_dz_broken_mpra_pseudo_norm[motif_sym_dz_broken_mpra_pseudo_norm < -2] = -2
+high_var_tfs_mpra = names(tail(sort(apply(motif_sym_dz_broken_mpra_pseudo_norm, 1, sd)),50))
+p = pheatmap(motif_sym_dz_broken_mpra_pseudo_norm[high_var_tfs_mpra,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_mpra_pseudo_norm_sel.pdf'), width=7,height=7)
+p = pheatmap(motif_sym_dz_broken_mpra_pseudo_norm, fontsize_row=6,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_mpra_pseudo_norm.pdf'), width=7,height=15)
+neuro_tfs_mpra_broken = neuro_tfs[neuro_tfs %in%rownames(motif_sym_dz_broken_mpra_pseudo_norm)]
+length(neuro_tfs_mpra_broken)
+p = pheatmap(motif_sym_dz_broken_mpra_pseudo_norm[neuro_tfs_mpra_broken,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_mpra_pseudo_norm_neuro.pdf'), width=7,height=7)
+
+
+
+
+# compare mpra sig to baseline
+chosen_motifs = rownames(motif_sym_dz_broken_mpra_pseudo_norm) [rownames(motif_sym_dz_broken_mpra_pseudo_norm) %in% rownames(motif_sym_dz_broken_pseudo_norm)]
+motif_sym_dz_broken_ratio_pseudo = motif_sym_dz_broken_mpra_pseudo[chosen_motifs,]/motif_sym_dz_broken_pseudo[chosen_motifs,]
+motif_sym_dz_broken_ratio_pseudo_norm = scale(log(motif_sym_dz_broken_ratio_pseudo))
+motif_sym_dz_broken_ratio_pseudo_norm[motif_sym_dz_broken_ratio_pseudo_norm>2] = 2
+motif_sym_dz_broken_ratio_pseudo_norm[motif_sym_dz_broken_ratio_pseudo_norm < -2] = -2
+high_var_tfs_ratio= names(tail(sort(apply(motif_sym_dz_broken_ratio_pseudo_norm, 1, sd)),50))
+p = pheatmap(motif_sym_dz_broken_ratio_pseudo_norm[high_var_tfs_ratio,], fontsize_row=8,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_ratio_pseudo_norm_sel.pdf'), width=7,height=7)
+p = pheatmap(motif_sym_dz_broken_ratio_pseudo_norm, fontsize_row=6,color =  colorRampPalette(rev(brewer.pal(n =8, name ="RdBu")))(255))
+save_pheatmap_pdf(p, paste0(save_dir,'motif_sym_dz_broken_ratio_pseudo_norm.pdf'), width=7,height=15)
+
+
+
+```
+
+
+
+
+
+```{r}
+all_snps = unique(lib_df$Linked_SNP)
+length(all_snps)
+snps_mpra_sig = unique(mpra_df$Linked_SNP)
+length(snps_mpra_sig)
+all_motifs = unique(motif_dir_ratio_df$geneSymbol)
+length(all_motifs)
+
+snp_motif_df = expand.grid(snp = all_snps, motif = all_motifs)%>%
+  left_join(motif_df_strong[,c("SNP_id","geneSymbol","allele_dir_bool")],by=c("snp"="SNP_id","motif"="geneSymbol"))%>%
+  mutate(is_mpra_sig = snp %in% snps_mpra_sig)%>%
+  mutate(is_motif_disrupted = !is.na(allele_dir_bool))%>%
+  mutate(A = is_mpra_sig&is_motif_disrupted) %>%
+  mutate(B = (!is_mpra_sig)&is_motif_disrupted) %>%
+  mutate(C = is_mpra_sig&(!is_motif_disrupted)) %>%
+  mutate(D = (!is_mpra_sig)&(!is_motif_disrupted))# %>%
+
+dim(snp_motif_df)
+sum(snp_motif_df$is_mpra_sig)
+sum(snp_motif_df$is_motif_disrupted)
+
+# fisher exact per motif corrected
+snp_motif_df_stats = snp_motif_df%>%
+  group_by(motif)%>%
+  select(A,B,C,D)%>%
+  summarise_all(sum)%>%
+  column_to_rownames('motif')
+
+snp_motif_df_stats$fisher_pval = apply(snp_motif_df_stats, 1, function(x) fisher.test(matrix(x[1:4],nrow=2))$p.value)
+snp_motif_df_stats$fisher_or = apply(snp_motif_df_stats, 1, function(x) fisher.test(matrix(x[1:4],nrow=2))$estimate[[1]])
+snp_motif_df_stats = snp_motif_df_stats%>%
+  rownames_to_column()%>%
+  arrange(fisher_pval)%>%
+  mutate(pval_bonf = pmin(1,fisher_pval*length(all_motifs) ))%>%
+  mutate(is_sig = pval_bonf<0.05)
+# mutate(A=is_mpra_sig & )
+  # group_by(geneSymbol)%>%
+  
+
+
+dim(snp_motif_df_stats)
+sum(snp_motif_df_stats$is_sig)
+
+summary(snp_motif_df_stats$fisher_or)
+
+snp_motif_df_stats
+write.csv(snp_motif_df_stats,'motifbreakr_results/snp_motif_df_stats.csv')
+```
+only THRA is signficantly enriched for being an mpra hit 
+
+:(
+
+## 5E
+
+- prediction can you predict MPRA results from motifs broken/gained
+
+```{r}
+# X value
+library(caret)
+snp_motif_df_wide = snp_motif_df%>%
+  select(snp,motif,is_mpra_sig,is_motif_disrupted)%>%
+  distinct()%>%
+  pivot_wider(id_cols=c("snp"),names_from="motif", values_from=is_motif_disrupted)%>%
+  column_to_rownames( 'snp')%>%
+  unnest()
+
+snp_motif_df_wide$is_mpra_sig = as.numeric(rownames(snp_motif_df_wide)%in% snps_mpra_sig)
+
+# ## linear regression # DIDN"T WORK
+# lr = lm(is_mpra_sig ~ ., data = snp_motif_df_wide)
+# summary(lr)
+
+# # Train the model using rf
+# fitControl <- trainControl(## -fold CV
+#           method = "cv",
+#           number = 3)
+# model_rf = caret::train(is_mpra_sig ~ ., data=snp_motif_df_wide, method='rf',metrics='accuracy',trControl = fitControl)
+# model_rf
+
+# 
+# # Train lasso
+# x = as.matrix(snp_motif_df_wide)
+# y =  as.factor(rownames(snp_motif_df_wide)%in% snps_mpra_sig)
+# 
+# lambdas <- 10^seq(2, -3, by = -.1)
+# 
+# # Setting alpha = 1 implements lasso regression
+# lasso_reg <- cv.glmnet(x, y_train, alpha = 1, lambda = lambdas, standardize = TRUE, nfolds = 5)
+# 
+# # Best 
+# lambda_best <- lasso_reg$lambda.min 
+# lambda_best
+
+```
+
+#### Regression tutorial
+https://www.pluralsight.com/guides/linear-lasso-and-ridge-regression-with-r
+```{r}
+dat = snp_motif_df_wide
+# glimpse(dat)
+dim(dat)
+# colnames(dat)
+
+## partition data
+set.seed(100) 
+
+index = sample(1:nrow(dat), 0.7*nrow(dat)) 
+
+train = dat[index,] # Create the training data 
+test = dat[-index,] # Create the test data
+
+dim(train)
+dim(test)
+
+
+## scale variables (not done b/c all logicals)
+# cols = c('pce', 'pop', 'psavert', 'uempmed')
+# 
+# pre_proc_val <- preProcess(train[,cols], method = c("center", "scale"))
+# 
+# train[,cols] = predict(pre_proc_val, train[,cols])
+# test[,cols] = predict(pre_proc_val, test[,cols])
+# 
+# summary(train)
+
+
+## 1. logistic regression (DIDN"T WORK)
+glm.fit <- glm(is_mpra_sig ~ ., data = train, family = binomial)
+
+# summary(glm.fit)
+glm.probs <- predict(glm.fit,type = "response",newdata = test)
+glm.probs[1:5]
+glm.pred <- ifelse(glm.probs > 0.5, TRUE, FALSE)
+table(glm.pred,test$is_mpra_sig)
+
+
+```
+
+
+
+
+- can you draw vignettes for a couple motifs that are broken leading to egenes (that are disease relevant)
+- just eyeball them
+
+
+
+```{r}
+# table per snp of motifs broken/gained
+table_motif_gained = motif_df_strong_gained%>%
+  group_by(SNP_id)%>%
+  arrange(geneSymbol)%>%
+  mutate(gained_motifs = paste0(geneSymbol, collapse = "|")) %>%
+  select(SNP_id,gained_motifs)
+
+table_motif_broken = motif_df_strong_broken%>%
+  group_by(SNP_id)%>%
+  arrange(geneSymbol)%>%
+  mutate(broken_motifs = paste0(geneSymbol, collapse = "|")) %>%
+  select(SNP_id,broken_motifs)
+
+table_motif_final = full_join(table_motif_broken, table_motif_gained, by='SNP_id')
+table_motif_final[is.na(table_motif_final)] = ''
+write.csv(table_motif_final, paste0(save_dir, 'table_motif_FINAL.csv'), quote=FALSE)
+```
+
+
+# reproduce https://pubmed.ncbi.nlm.nih.gov/30737407/#&gid=article-figures&pid=fig-3-uid-2
+
+histogram of motifs 
+```{r}
+motif_df_strong_broken_count = motif_df_strong_broken%>%
+  group_by(geneSymbol)%>%
+  tally()%>%
+  ungroup()%>%
+  arrange(desc(n))%>%
+  filter(geneSymbol %in% neuro_tfs)
+  
+ggplot(motif_df_strong_broken_count, aes(x=geneSymbol,y=n)) +geom_bar(stat = "identity") +
+  theme(axis.text.x=element_text(angle = -45, hjust = 0))
+# 
+# # find all pairwise combinations of motifs
+# left_join(dt, dt, by = "Group") %>% 
+#     filter(Ind.x != Ind.y) %>% 
+#     rowwise %>%
+#     mutate(name = toString(sort(c(Ind.x,Ind.y)))) %>% 
+#     select(Group, name) %>% 
+#     distinct %>% 
+#     separate(name, into = c("Ind1", "Ind2")) %>% 
+#     arrange(Group, Ind1, Ind2)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+save.image("~/Google Drive/1_khavari/noncancer_project/miseq/novogene_071420/motifbreakr_results/workspace.RData")
+
+```
+
+
